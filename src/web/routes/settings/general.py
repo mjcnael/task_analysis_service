@@ -314,11 +314,18 @@ async def yandex_hints(request: Request):
 async def settings_app(request: Request):
     watch_field_changes = (await cfg_get("watch_field_changes")) == "1"
     watch_tasks = (await cfg_get("watch_tasks")) == "1"
+    sync_enabled = (await cfg_get("sync_enabled")) != "0"  # по умолчанию вкл
+    try:
+        sync_interval = int(await cfg_get("sync_interval") or 60)
+    except (TypeError, ValueError):
+        sync_interval = 60
     saved = request.session.pop("saved", None)
     return settings_template("app.html", {
         "request": request,
         "watch_field_changes": watch_field_changes,
         "watch_tasks": watch_tasks,
+        "sync_enabled": sync_enabled,
+        "sync_interval": sync_interval,
         "saved": saved,
     })
 
@@ -328,7 +335,39 @@ async def settings_app_submit(request: Request):
     form = await request.form()
     await cfg_set("watch_field_changes", "1" if form.get("watch_field_changes") else "0")
     await cfg_set("watch_tasks", "1" if form.get("watch_tasks") else "0")
+
+    sync_enabled = form.get("sync_enabled") is not None
+    await cfg_set("sync_enabled", "1" if sync_enabled else "0")
+
+    try:
+        sync_interval = int(form.get("sync_interval") or 60)
+        if sync_interval < 10:
+            sync_interval = 10
+    except (TypeError, ValueError):
+        sync_interval = 60
+    await cfg_set("sync_interval", str(sync_interval))
+
+    # применяем налету
+    from core.sync import start_scheduler, stop_scheduler, reschedule
+    if sync_enabled:
+        start_scheduler(sync_interval)
+        reschedule(sync_interval)
+    else:
+        stop_scheduler()
+
     request.session['saved'] = True
+    return RedirectResponse(settings_router.prefix + "/app", status_code=HTTP_303_SEE_OTHER)
+
+
+@settings_router.post("/app/sync-now")
+async def settings_app_sync_now(request: Request):
+    """Принудительная разовая синхронизация по кнопке."""
+    from core.sync import sync_once
+    try:
+        await sync_once()
+        request.session['saved'] = True
+    except Exception as e:
+        logging.warning(f"Принудительная синхронизация завершилась с ошибкой: {e}")
     return RedirectResponse(settings_router.prefix + "/app", status_code=HTTP_303_SEE_OTHER)
 
 
