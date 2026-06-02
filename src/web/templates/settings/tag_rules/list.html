@@ -23,9 +23,9 @@
         <h2 class="text-3xl font-extrabold dark:text-white my-8">Настройка действий при установке тегов</h2>
 
         {% if not initialized %}
-        <p class="text-gray-500 dark:text-gray-400 my-6">Сначала нужно <a href="/settings/asana"
+        <p class="text-gray-500 dark:text-gray-400 my-6">Сначала нужно <a href="/settings/bitrix"
                 class="inline-flex items-center font-medium text-blue-600 dark:text-blue-500 hover:underline">
-                настроить интеграцию Asana
+                настроить интеграцию Bitrix24
                 <svg class="w-4 h-4 ms-2 rtl:rotate-180" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"
                     fill="none" viewBox="0 0 14 10">
                     <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -60,7 +60,7 @@
                     <tr
                         class="odd:bg-white odd:dark:bg-gray-900 even:bg-gray-50 even:dark:bg-gray-800 border-b dark:border-gray-700 border-gray-200">
                         <td class="px-2 py-4 w-4">
-                            <a href="/settings/asana/tag-rules/rule/{{ tag_rule.id }}">
+                            <a href="/settings/bitrix/tag-rules/rule/{{ tag_rule.id }}">
                                 <svg class="w-6 h-6 text-gray-300 dark:text-white" aria-hidden="true"
                                     xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none"
                                     viewBox="0 0 24 24">
@@ -84,7 +84,7 @@
                 </tbody>
             </table>
         </div>
-        <a href="/settings/asana/tag-rules/rule/new"
+        <a href="/settings/bitrix/tag-rules/rule/new"
             class="my-2 text-white bg-blue-700 hover:bg-blue-800 focus:ring-4 focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 dark:bg-blue-600 dark:hover:bg-blue-700 focus:outline-none dark:focus:ring-blue-800">
             Новое
         </a>
@@ -92,7 +92,7 @@
         {% else %}
 
         <p class="text-gray-500 dark:text-gray-400 my-6">Нет сохраненных правил, создайте <a
-                href="/settings/asana/tag-rules/rule/new"
+                href="/settings/bitrix/tag-rules/rule/new"
                 class="inline-flex items-center font-medium text-blue-600 dark:text-blue-500 hover:underline">
                 новое
                 <svg class="w-4 h-4 ms-2 rtl:rotate-180" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"
@@ -108,7 +108,7 @@
     </div>
     <div class="hidden rounded-lg" id="dashboard" role="tabpanel" aria-labelledby="dashboard-tab">
         <h2 class="text-3xl font-extrabold dark:text-white my-8">Отслеживать события в проектах:</h2>
-        <form action="/settings/asana/projects-listening" method="POST">
+        <form action="/settings/bitrix/projects-listening" method="POST">
             <div class="grid gap-6 mb-6 lg:grid-cols-3 md:grid-cols-2">
                 {% for project in avail_projects%}
                 <div class="flex items-center ps-4 border border-gray-200 rounded-sm dark:border-gray-700">

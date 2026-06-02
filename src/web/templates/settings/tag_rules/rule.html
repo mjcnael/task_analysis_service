@@ -31,7 +31,7 @@
         <label for="project" class="block my-2 text-sm font-medium text-gray-900 dark:text-white">Проект</label>
         <select required id="project" name="project"
             class="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white dark:focus:ring-blue-500 dark:focus:border-blue-500"
-            hx-get="/settings/asana/project_sections" hx-target="#section" hx-trigger="change" hx-swap="outerHTML"
+            hx-get="/settings/bitrix/project_sections" hx-target="#section" hx-trigger="change" hx-swap="outerHTML"
             hx-indicator="#loader">
             <option disabled {{ 'selected' if tag_rule is none }} hidden value="">Выберите...</option>
             {% for project in projects %}
@@ -172,7 +172,7 @@
             </div>
             <!-- Modal footer -->
             <div class="flex items-center p-4 md:p-5 border-t border-gray-200 rounded-b dark:border-gray-600">
-                <form id="delete-form" action="/settings/asana/tag-rules/rule-delete/{{ tag_rule.id }}" method="POST">
+                <form id="delete-form" action="/settings/bitrix/tag-rules/rule-delete/{{ tag_rule.id }}" method="POST">
                     <button type="submit"
                         class="text-white bg-red-700 hover:bg-red-800 focus:ring-4 focus:outline-none focus:ring-red-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-red-600 dark:hover:bg-red-700 dark:focus:ring-red-800">Подтвердить</button>
                 </form>

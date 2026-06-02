@@ -1,438 +1,233 @@
-from datetime import datetime
-from asana.events import EventsApi
-from typing import List
-from sqlalchemy import select
-from asana.client import AsanaApiError
-from asana.models import Event, ActionType
-from database.models import Ticket, Status, TagRule, TelegramConfigExtended
-from database import Database
+"""Обработка событий, приходящих от Bitrix24 через исходящий вебхук.
+
+Сохраняет в БД историю изменений задач, обновляет тикеты, рассылает
+уведомления в Telegram (analog Asana-events из исходной версии).
+"""
 import logging
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-from asana import get_task_api, asana_client, get_projects_api
+from typing import Any, Dict, Optional
+from sqlalchemy import select
+
+from database import Database
+from database.models import Ticket, Status, TagRule, TelegramConfigExtended
+from bitrix import get_task_api
+from bitrix.client import BitrixApiError
 from config_manager import get
 from tgbot import TgBot
-from zoneinfo import ZoneInfo
-from .late_update_tickets import after_downtime_update
-from utils import calculate_safe_interval
-import asyncio
 
 
-scheduler = AsyncIOScheduler()
-scheduler_job = None
-default_update_interval = 5
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
-
-events_api = None
-events_apis: list[EventsApi] = []
-__need_to_refresh = False
+def _extract_event_name(payload: Dict[str, Any]) -> str:
+    """Bitrix отдаёт имя события в поле 'event' (например ONTASKUPDATE)."""
+    return (payload.get("event") or payload.get("EVENT") or "").upper()
 
 
-def schedule_refresh():
-    global __need_to_refresh
-    __need_to_refresh = True
-# sub_events_api = None
+def _extract_task_id(payload: Dict[str, Any]) -> Optional[str]:
+    """Достаёт id задачи из произвольной формы payload."""
+    # Возможные пути в зависимости от события:
+    # data[FIELDS_AFTER][ID]  /  data[FIELDS][ID]  /  data[TASK_ID]
+    for key in ("data[FIELDS_AFTER][ID]", "data[FIELDS][ID]",
+                "data[TASK_ID]", "data[FIELDS_BEFORE][ID]"):
+        if key in payload:
+            return str(payload[key])
+    data = payload.get("data") or {}
+    if isinstance(data, dict):
+        for k in ("FIELDS_AFTER", "FIELDS", "FIELDS_BEFORE"):
+            sub = data.get(k)
+            if isinstance(sub, dict) and "ID" in sub:
+                return str(sub["ID"])
+        if "TASK_ID" in data:
+            return str(data["TASK_ID"])
+    return None
 
 
-async def request_events():
-    global events_api
-    global events_apis
-    global __need_to_refresh
-    # global sub_events_api
+async def handle_bitrix_event(payload: Dict[str, Any]) -> None:
+    """Точка входа для исходящего вебхука Bitrix24."""
+    event = _extract_event_name(payload)
+    task_id = _extract_task_id(payload)
+    logging.info(f"Bitrix event: {event}, task_id={task_id}")
 
-    if events_api is None or __need_to_refresh:  # or sub_events_api is None:
-        __need_to_refresh = False
-        main_project_gid = await get("main_project_gid")
-        listen_str = await get("listen_projects")
-        # sub_project_gid = await get("sub_project_gid")
+    if not event or not task_id:
+        logging.warning(f"Не удалось распознать событие Bitrix24: {payload}")
+        return
 
-        if main_project_gid is not None:  # and sub_project_gid is not None:
-            # {sub_project_gid}")
-            logging.info(
-                f"Основной проект: {main_project_gid}. События будут отслеживаться")
-            events_api = EventsApi(asana_client, main_project_gid)
-            events_api.register_sync_callback(after_downtime_update)
-
-            # sub_events_api = EventsApi(asana_client, sub_project_gid)
-        else:
-            return
-
-        if listen_str is not None:
-            listen = listen_str.split(" ")
-            if len(listen) > 0 and listen_str != "":
-                events_apis = []
-                for gid in listen:
-                    if main_project_gid is not None and main_project_gid != gid:
-                        events_apis.append(EventsApi(asana_client, gid))
-                        logging.info(
-                            f"Будут отслеживаться события проекта {gid}")
-
-                new_interval = calculate_safe_interval(len(listen) + 1)
-                logging.info(
-                    F"События будут запрашиваться для {len(listen)} дополнительных проектов каждые {new_interval} секунд")
-                if scheduler_job is not None:
-                    scheduler_job.reschedule(
-                        trigger=IntervalTrigger(seconds=new_interval))
-            else:
-                logging.info("Доплонительных проектов для отслеживания нет")
-        else:
-            logging.info(
-                "Нет информации для отслеживания дополнительных проектов")
-
-    # events = await events_api.get_events()
-    # await handle_events(events)
-
-    # for api in events_apis:
-    #     events = await api.get_events()
-    #     await handle_events(events)
-    # logging.info("Начинаю запрос событий")
-    all_apis = [events_api] + events_apis
-
-    results = await asyncio.gather(*[api.get_events() for api in all_apis])
-    # logging.info("События получены. Обрабатываю")
-    await asyncio.gather(*[handle_events(events) for events in results])
-    # logging.info("Запрос событий завершен")
-
-    # sub_events = await sub_events_api.get_events()
-    # await handle_events(sub_events)
+    if event in ("ONTASKADD",):
+        await _on_task_add(task_id)
+    elif event in ("ONTASKUPDATE",):
+        await _on_task_update(task_id)
+    elif event in ("ONTASKDELETE",):
+        await _on_task_delete(task_id)
+    elif event in ("ONTASKCOMMENTADD",):
+        comment = (payload.get("data[COMMENT][POST_MESSAGE]")
+                   or (payload.get("data") or {}).get("COMMENT", {}).get("POST_MESSAGE", ""))
+        await _on_comment_add(task_id, comment)
+    else:
+        logging.info(f"Событие {event} не обрабатывается")
 
 
-def activate_scheduler():
-    global scheduler_job
-    scheduler_job = scheduler.add_job(
-        request_events, 'interval', seconds=default_update_interval)
-    scheduler.start()
-
-
-def shutdown_scheduler():
-    scheduler.shutdown()
-
-
-async def handle_events(events: List[Event]):
-    for e in events:
-        logging.info(e)
-    for e in events:
-        if e.is_status_change_event():
-            await on_section_moved(e)
-        elif e.is_new_task_added():
-            await on_new_task_added(e)
-        elif e.is_field_change():
-            await on_field_changed(e)
-        elif e.is_deleted_task():
-            await on_task_delete(e)
-        elif e.is_undeleted_task():
-            await on_task_undelete(e)
-        elif e.is_tag_add():
-            await on_tag_add_ruled(e)
-        elif e.is_tag_removed():
-            await on_tag_remove(e)
-        elif e.is_story_add():
-            await on_story_add(e)
-
-
-async def on_section_moved(event: Event):
-    async with Database.make_session() as session:
-        ticket = await Ticket.get_by_gid(session, event.resource.gid)
-        saved_ticket = True
-        if ticket is None:
-            await on_new_task_added(event)
-            ticket = await get_asana_task(event.resource.gid)
-            if ticket is None:
-                return
-            saved_ticket = False
-
-        assert event.parent is not None
-
-        chats = (await session.execute(select(TelegramConfigExtended).where(TelegramConfigExtended.status_changed == True))).scalars().all()
-        for chat in chats:
-            if chat.additional == event.project:
-                await TgBot.send_message(chat.chat_id, f"'{ticket.title}' перемещено в '{event.parent.name}'")
-
-        if not saved_ticket:
-            return
-
-        status = Status(text=event.parent.name, ticket=ticket,
-                        datetime=event.created_at_local_timezone)
-        session.add(status)
-        logging.info(f"Задача {ticket.title} перемещена в '{status.text}'")
-
-        # notify = (await get("notify_status_changed")) == "1"
-
-
-async def get_asana_task(gid: str):
+async def _fetch_task(task_id: str) -> Optional[dict]:
     task_api = get_task_api()
-    assert task_api is not None
+    if task_api is None:
+        return None
     try:
-        ticket_data = await task_api.get_task(gid)
-    except AsanaApiError as e:
-        if e.status == 404:
-            logging.warning(f"Задачи gid={gid} не существует")
-            logging.warning(e.body['errors'][0]['message'])
-            return None
-
-    ticket = Ticket(
-        gid=ticket_data['gid'], title=ticket_data['name'], text=ticket_data['notes'], created_at=datetime.now())
-    return ticket
+        return await task_api.get_task(task_id)
+    except BitrixApiError as e:
+        logging.warning(f"Не удалось получить задачу {task_id}: {e}")
+        return None
 
 
-async def on_new_task_added(event: Event):
+async def _on_task_add(task_id: str) -> None:
+    """Если задачу создал кто-то напрямую в Bitrix24 — подхватываем её, если включено."""
     watch = (await get("watch_tasks")) == "1"
-
     if not watch:
         return
-
+    task = await _fetch_task(task_id)
+    if not task:
+        return
     async with Database.make_session() as session:
-        ticket = await Ticket.get_by_gid(session, event.resource.gid)
-
-        if ticket is not None:
+        existing = await Ticket.get_by_gid(session, task_id)
+        if existing is not None:
             return
-
-        task_api = get_task_api()
-        assert task_api is not None
-        try:
-            ticket_data = await task_api.get_task(event.resource.gid)
-        except AsanaApiError as e:
-            if e.status == 404:
-                logging.warning("Задачи не существует")
-                logging.warning(e.body['errors'][0]['message'])
-                return
-
         ticket = Ticket(
-            gid=ticket_data['gid'], title=ticket_data['name'], text=ticket_data['notes'], created_at=event.created_at_local_timezone)
+            gid=task_id,
+            title=task.get("title", f"Bitrix task {task_id}"),
+            text=task.get("description", "") or "",
+        )
         session.add(ticket)
-
-        status = Status(
-            text=ticket_data['memberships'][0]['section']['name'], ticket=ticket, datetime=event.created_at_local_timezone)
-        session.add(status)
+        session.add(Status(text="Создано (из Bitrix24)", ticket=ticket))
 
 
-async def on_field_changed(event: Event):
-    watch = (await get("watch_field_changes")) == "1"
-
-    if not watch:
+async def _on_task_update(task_id: str) -> None:
+    task = await _fetch_task(task_id)
+    if not task:
         return
 
-    async with Database.make_session() as session:
-        ticket = await Ticket.get_by_gid(session, event.resource.gid)
+    new_stage = str(task.get("stageId") or task.get("STAGE_ID") or "")
+    is_completed = str(task.get("status", "")) in ("5",)  # 5 = завершена в Bitrix24
 
+    async with Database.make_session() as session:
+        ticket = await Ticket.get_by_gid(session, task_id)
         if ticket is None:
-            logging.warning(
-                f"Обновлено поле несущесвтующей задачи. gid={event.resource.gid}")
             return
 
-        task_api = get_task_api()
-        assert task_api is not None
-        ticket_data = await task_api.get_task(event.resource.gid)
-        ticket.title = ticket_data['name']
-        ticket.text = ticket_data['notes']
-        ticket.completed = ticket_data['completed']
+        # обновляем поля
+        title = task.get("title") or ticket.title
+        desc = task.get("description") or ticket.text
+        if title != ticket.title or desc != ticket.text:
+            watch_fields = (await get("watch_field_changes")) == "1"
+            if watch_fields:
+                ticket.title = title
+                ticket.text = desc
+
+        if is_completed and not ticket.completed:
+            ticket.completed = True
+            session.add(Status(text="Завершено", ticket=ticket))
+
+        # изменение стадии
+        last = ticket.last_status
+        if new_stage and (last is None or not (last.text or "").startswith(f"Stage {new_stage}")):
+            from bitrix import get_projects_api
+            papi = get_projects_api()
+            stage_name = f"Stage {new_stage}"
+            if papi is not None:
+                try:
+                    for s in await papi.get_sections(str(task.get("groupId") or "")):
+                        if str(s.get("gid")) == new_stage:
+                            stage_name = s.get("name") or stage_name
+                            break
+                except Exception:
+                    pass
+            if last is None or last.text != stage_name:
+                session.add(Status(text=stage_name, ticket=ticket))
+                await _notify_chats(session, "status_changed",
+                                    f"'{ticket.title}' перемещено в '{stage_name}'")
+
+        # обработка тегов
+        new_tags = task.get("tags") or task.get("TAGS") or []
+        if new_tags:
+            await _apply_tag_rules(session, ticket, new_tags)
 
         session.add(ticket)
 
 
-async def on_task_delete(event: Event):
+async def _on_task_delete(task_id: str) -> None:
+    from datetime import datetime
     async with Database.make_session() as session:
-        ticket = await Ticket.get_by_gid(session, event.resource.gid)
-        saved_ticket = True
+        ticket = await Ticket.get_by_gid(session, task_id)
         if ticket is None:
-            logging.warning(
-                f"Удалена неотслеживаемая задача задачи. gid={event.resource.gid}")
-            saved_ticket = False
-            # ticket = await get_asana_task(event.resource.gid)
-            # if ticket is None:
-            #     return
-        
-        chats = (await session.execute(select(TelegramConfigExtended).where(TelegramConfigExtended.deleted == True))).scalars().all()
-        for chat in chats:
-            if chat.additional == event.project:
-                if event.resource.name != "":
-                    await TgBot.send_message(chat.chat_id, f"'{event.resource.name}' удалено")
-        
-        if not saved_ticket or ticket is None:
             return
-        
         ticket.deleted = True
-        ticket.deleted_at = event.created_at_local_timezone
+        ticket.deleted_at = datetime.now()
         session.add(ticket)
-
-        status = Status(text='Удалено', ticket=ticket,
-                        datetime=event.created_at_local_timezone)
-        session.add(status)
+        session.add(Status(text="Удалено", ticket=ticket))
+        await _notify_chats(session, "deleted", f"'{ticket.title}' удалено")
 
 
-
-async def on_task_undelete(event: Event):
+async def _on_comment_add(task_id: str, comment_text: str) -> None:
     async with Database.make_session() as session:
-        ticket = await Ticket.get_by_gid(session, event.resource.gid)
+        ticket = await Ticket.get_by_gid(session, task_id)
         if ticket is None:
-            logging.warning(
-                f"Восстановлена несущесвтующая задачи. gid={event.resource.gid}")
             return
-        ticket.deleted = False
-        session.add(ticket)
-
-        status = Status(text="Удаление отменено", ticket=ticket,
-                        datetime=event.created_at_local_timezone)
-        session.add(status)
+        text = f"На '{ticket.title}' добавлен комментарий"
+        if comment_text:
+            text += f": {comment_text}"
+        await _notify_chats(session, "commented", text)
 
 
-async def on_tag_add_ruled(event: Event):
-    assert event.parent is not None
-    tag = event.parent.name
+async def _apply_tag_rules(session, ticket: Ticket, tags: list) -> None:
+    tag_names = []
+    for t in tags:
+        if isinstance(t, str):
+            tag_names.append(t)
+        elif isinstance(t, dict):
+            n = t.get("name") or t.get("NAME")
+            if n:
+                tag_names.append(n)
 
-    async with Database.make_session() as session:
-        query = select(TagRule).where(TagRule.tag == tag)
-        res = await session.execute(query)
-        tag_rule = res.scalar_one_or_none()
+    if not tag_names:
+        return
 
-        chats = (await session.execute(select(TelegramConfigExtended).where(TelegramConfigExtended.sub_tag_setted == True))).scalars().all()
+    rules = (await session.execute(
+        select(TagRule).where(TagRule.tag.in_(tag_names))
+    )).scalars().all()
 
-    if tag_rule is None:
+    if not rules:
         return
 
     task_api = get_task_api()
-    assert task_api is not None
-
-    ticket_gid = event.resource.gid
-    res = await task_api.add_to_project(ticket_gid, tag_rule.project_gid, tag_rule.section_gid)
-    assert isinstance(res, dict)
-
-    if 'data' not in res.keys():
-        logging.warning(
-            f"Не удалось установить задачу в проект {tag_rule.project_gid}(gid={tag_rule.project_gid}) в колонку {tag_rule.section_name}(gid={tag_rule.section_gid})")
+    if task_api is None:
         return
 
-    logging.info(
-        f"Задача {ticket_gid} установлена в проект {tag_rule.project_gid}(gid={tag_rule.project_gid})")
-
-    if tag_rule.action == 1:
-        # TODO: удалять из всех проектов, кроме нужного
-        task_info = await task_api.get_task(ticket_gid)
-        for membership in task_info['memberships']:
-            if membership['project']['gid'] == tag_rule.project_gid:
-                continue
-            res = await task_api.remove_from_project(ticket_gid, membership['project']['gid'])
-            logging.info(
-                f"Задача {ticket_gid} удалена из проекта {membership['project']['gid']}")
-
-        async with Database.make_session() as session:
-            ticket = await Ticket.get_by_gid(session, ticket_gid)
-            if ticket is not None:
-                status_move = Status(
-                    text=f"Перемещено при установке тега '{tag_rule.tag}'", ticket=ticket)
-                ticket.deleted = True
-                session.add(ticket)
-                session.add(status_move)
-                status_delete = Status(text=f"Удалено", ticket=ticket)
-                session.add(status_delete)
+    for rule in rules:
+        # переносим/добавляем в другую группу/стадию
+        try:
+            fields = {"GROUP_ID": int(rule.project_gid) if rule.project_gid.isdigit() else rule.project_gid}
+            if rule.section_gid:
+                fields["STAGE_ID"] = int(rule.section_gid) if rule.section_gid.isdigit() else rule.section_gid
+            await task_api.update_task(ticket.gid, fields)
+            session.add(Status(
+                text=f"Перемещено по правилу тега '{rule.tag}'", ticket=ticket
+            ))
+            await _notify_chats(
+                session, "sub_tag_setted",
+                f"На '{ticket.title}' тег '{rule.tag}': задача перенесена в '{rule.project_name or rule.project_gid}'"
+            )
+        except BitrixApiError as e:
+            logging.warning(f"Не удалось применить правило тега {rule.tag}: {e}")
 
 
-
-    task_api = get_task_api()
-    if task_api is not None:
-        task = await task_api.get_task(ticket_gid)
-
-    for chat in chats:
-        text = f"На задачу '{task['name']}' установлен тег '{tag_rule.tag}'"
-        if tag_rule.project_name is not None:
-            text += f". Задача {'перемещена' if tag_rule.action == 1 else 'добавлена'} в проект '{tag_rule.project_name}'"
-        if chat.additional == event.project:
-            await TgBot.send_message(chat.chat_id, text)
-
-
-async def on_tag_add(event: Event):
-    logging.warning(
-        "'on_tag_add(event: Event)' function deprecated. Now using 'on_tag_add_ruled(event: Event)'")
-    return
-    assert event.parent is not None
-    assert event.parent.name is not None
-
-    tag = await get("tag")
-
-    if tag is not None and tag.lower() == event.parent.name.lower():
-        ticket_gid = event.resource.gid
-
-        assert sub_events_api is not None
-        sub_project_gid = sub_events_api.get_resource()
-
-        task_api = get_task_api()
-        assert task_api is not None
-        res = await task_api.add_to_project(ticket_gid, sub_project_gid)
-        assert isinstance(res, dict)
-
-        if 'data' not in res.keys():
-            logging.warning(
-                f"Не удалось установить задачу в проект {sub_project_gid}")
-            return
-
-        logging.info(
-            f"Задача {ticket_gid} установлена в проект {sub_project_gid}")
-
-        res = await task_api.remove_from_project(ticket_gid, task_api._client.main_project_gid)
-        logging.info(
-            f"Задача {ticket_gid} удалена из проекта в проект {task_api._client.main_project_gid}")
-
-        async with Database.make_session() as session:
-            ticket = await Ticket.get_by_gid(session, ticket_gid)
-            if ticket is None:
-                logging.warning(
-                    f"Поставлен тег на неизвестную задачу gid={ticket_gid}")
-                return
-            ticket.sub_contract = True
-            session.add(ticket)
-            # status = Status(text='Перемещено в субподряд', ticket=ticket, datetime=event.created_at_local_timezone)
-            # session.add(status)
-
-    notify = (await get("notify_sub_tag_setted")) == "1"
-    if notify:
-        await TgBot.send_message(f"'{ticket.title}' отмечено как субподряд")
-
-
-async def on_tag_remove(event: Event):
-    assert event.parent is not None
-    assert event.parent.name is not None
-
-    tag = await get("tag")
-
-    if tag is not None and tag.lower() == event.parent.name.lower():
-        ticket_gid = event.resource.gid
-
-        async with Database.make_session() as session:
-            ticket = await Ticket.get_by_gid(session, ticket_gid)
-            if ticket is None:
-                logging.warning(
-                    f"Удален тег с неизвестной задачи gid={ticket_gid}")
-                return
-            ticket.sub_contract = False
-            session.add(ticket)
-
-
-async def on_story_add(event: Event):
-    projects_api = get_projects_api()
-
-    if projects_api is None:
+async def _notify_chats(session, flag: str, text: str) -> None:
+    column = {
+        "status_changed": TelegramConfigExtended.status_changed,
+        "deleted": TelegramConfigExtended.deleted,
+        "commented": TelegramConfigExtended.commented,
+        "sub_tag_setted": TelegramConfigExtended.sub_tag_setted,
+        "created": TelegramConfigExtended.created,
+        "created_full": TelegramConfigExtended.created_full,
+    }.get(flag)
+    if column is None:
         return
-
-    try:
-        story = await projects_api.get_story(event.resource.gid)
-    except AsanaApiError as e:
-        if e.status == 404:
-            logging.info("Добавлена история к неотслеживаемой задаче")
-            return
-        raise
-
-    if story['type'] == "comment":
-        async with Database.make_session() as session:
-            chats = (await session.execute(select(TelegramConfigExtended).where(TelegramConfigExtended.commented == True))).scalars().all()
-            for chat in chats:
-                assert event.parent is not None
-                ticket_gid = event.parent.gid
-                ticket = await Ticket.get_by_gid(session, ticket_gid)
-
-                if ticket is None:
-                    ticket = await get_asana_task(event.parent.gid)
-                    if ticket is None:
-                        return
-                
-                if chat.additional == event.project:
-                    await TgBot.send_message(chat.chat_id, f"На '{ticket.title}' добавлен комментарий '{story['text']}'")
+    chats = (await session.execute(select(TelegramConfigExtended).where(column == True))).scalars().all()
+    for c in chats:
+        try:
+            await TgBot.send_message(c.chat_id, text)
+        except Exception as e:
+            logging.warning(f"Не удалось отправить в чат {c.chat_id}: {e}")

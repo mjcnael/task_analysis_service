@@ -15,7 +15,15 @@
         <label for="watch_field_changes"
             class="w-full p-2 py-4 md:py-2 ms-2 text-sm font-medium text-gray-900 dark:text-gray-300">Обновлять
             заголовок и
-            описание при их изменении в Asana</label>
+            описание при их изменении в Bitrix24</label>
+    </div>
+
+    <div class="flex items-center ps-4 border border-gray-200 rounded-sm dark:border-gray-700 mb-6">
+        <input id="watch_tasks" type="checkbox" value="" name="watch_tasks" {{ "checked" if watch_tasks }}
+            class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded-sm focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600">
+        <label for="watch_tasks"
+            class="w-full p-2 py-4 md:py-2 ms-2 text-sm font-medium text-gray-900 dark:text-gray-300">Подхватывать задачи, созданные напрямую в Bitrix24
+            (если выключено — учитываются только задачи, поступившие через форму)</label>
     </div>
 
     <div class="flex items-center">

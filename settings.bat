@@ -1,2 +1,0 @@
-set HOST=0.0.0.0
-set PORT=8000

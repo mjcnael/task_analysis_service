@@ -4,8 +4,7 @@ from typing import Callable
 from fastapi import FastAPI
 import logging
 from database import Database
-from core.events_handler import activate_scheduler
-from asana import try_create_apis
+from bitrix import try_create_apis
 
 
 @asynccontextmanager
@@ -29,11 +28,12 @@ def status_message(text: str):
 @status_message("Инициализация")
 async def startup():
     await Database.create_all()
-    activate_scheduler()
-    await try_create_apis()
+    try:
+        await try_create_apis()
+    except Exception as e:
+        logging.error(f"Не удалось инициализировать клиент Bitrix24 при старте: {e}")
 
 
-
-@status_message("выключение")
+@status_message("Выключение")
 async def shutdown():
     pass

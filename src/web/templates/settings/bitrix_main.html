@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Настройка интеграции Bitrix24{% endblock %}
+{% block content %}
+<h2 class="text-3xl font-extrabold dark:text-white my-8">Настройка интеграции Bitrix24</h2>
+<script src="{{ url_for('static', path='js/htmx.js') }}"></script>
+<style>
+    #loader { display: none; }
+    #loader.htmx-request { display: block; }
+</style>
+
+<form id="form" action="" method="post">
+    <div class="mb-6">
+        <label for="bitrix_webhook" class="block mb-2 text-sm font-medium text-gray-900 dark:text-white">
+            URL входящего вебхука Bitrix24
+        </label>
+        <input type="text" id="bitrix_webhook" name="bitrix_webhook"
+            class="bg-gray-50 border {% if data and data.get('success') == False %}border-red-500{% else %}border-gray-300{% endif %} text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+            placeholder="https://your-portal.bitrix24.ru/rest/USER_ID/WEBHOOK_TOKEN/"
+            value="{{ webhook or '' }}" />
+        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+            Создать входящий вебхук можно в Bitrix24: <em>Разработчикам → Другое → Входящий вебхук</em>.
+            Доступы: <code>task</code>, <code>user</code>, <code>sonet_group</code>.
+        </p>
+        {% if data and data.get('message') %}
+        <p class="mt-2 text-sm {{ 'text-green-600' if data.get('success') else 'text-red-600' }}">{{ data['message'] }}</p>
+        {% endif %}
+    </div>
+
+    {% if projects %}
+    <div class="grid sm:grid-cols-2 gap-6 items-start mb-6">
+        <div>
+            <label for="main_project" class="block mb-2 text-sm font-medium text-gray-900 dark:text-white">
+                Проект «Челлендж ОВ»
+            </label>
+            <select required id="main_project" name="main_project"
+                class="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                hx-get="/settings/bitrix/project_sections" hx-target="#section" hx-trigger="change" hx-swap="outerHTML"
+                hx-indicator="#loader">
+                <option value="" disabled {{ 'selected' if not data or not data.get('selected_main') }} hidden>Выберите...</option>
+                {% for project in projects %}
+                <option {{ 'selected' if data and data.get('selected_main') == project['gid'] }} value="{{ project['gid'] }}">{{ project['name'] }}</option>
+                {% endfor %}
+            </select>
+            {% if data and data.get('project_message_1') %}
+            <p class="mt-2 text-sm {{ 'text-green-600' if data.get('project_success') else 'text-red-600' }}">{{ data['project_message_1'] }}</p>
+            {% endif %}
+            <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">В этот проект (рабочая группа) будут создаваться задачи челленджа</p>
+        </div>
+        <div class="flex w-full items-end">
+            <div id="loader" role="status" class="m-4"></div>
+            <div class="w-full">
+                <label for="section" class="block mb-2 text-sm font-medium text-gray-900 dark:text-white">
+                    Стадия по умолчанию
+                </label>
+                <select id="section" name="section"
+                    class="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:text-white">
+                    <option value="">Без явной стадии</option>
+                    {% for section in sections %}
+                    <option {{ 'selected' if selected_section == section['gid'] }} value="{{ section['gid'] }}">{{ section['name'] }}</option>
+                    {% endfor %}
+                </select>
+                {% if data and data.get('project_message_2') %}
+                <p class="mt-2 text-sm {{ 'text-green-600' if data.get('section_success') else 'text-red-600' }}">{{ data['project_message_2'] }}</p>
+                {% endif %}
+                <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">В эту стадию канбана будут попадать новые задачи</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="mb-6">
+        <label for="default_responsible_id" class="block mb-2 text-sm font-medium text-gray-900 dark:text-white">
+            ID ответственного по умолчанию (опционально)
+        </label>
+        <input type="text" id="default_responsible_id" name="default_responsible_id"
+            value="{{ default_responsible_id or '' }}"
+            class="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+            placeholder="например, 1" />
+        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+            Назначается ответственным, если менеджер по наряду не найден в Bitrix24.
+        </p>
+    </div>
+
+    <p class="text-gray-500 dark:text-gray-400 my-6">
+        Дополнительные настройки: <a href="/settings/bitrix/tag-rules/" class="font-medium text-blue-600 dark:text-blue-500 hover:underline">правила тегов</a>
+    </p>
+    {% endif %}
+
+    <button id="save_btn"
+        class="text-white bg-blue-700 hover:bg-blue-800 focus:ring-4 focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 me-2 mb-2 dark:bg-blue-600 dark:hover:bg-blue-700">
+        Сохранить
+    </button>
+</form>
+
+<div class="mt-8 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
+    <h3 class="text-lg font-semibold dark:text-white mb-2">Исходящий вебхук Bitrix24 для событий</h3>
+    <p class="text-sm text-gray-600 dark:text-gray-400">
+        Чтобы получать события о задачах (изменение статуса, удаление, комментарии) из Bitrix24, создайте
+        <em>Исходящий вебхук</em>: <em>Разработчикам → Другое → Исходящий вебхук</em>.
+    </p>
+    <ul class="list-disc list-inside text-sm text-gray-600 dark:text-gray-400 mt-2">
+        <li>URL обработчика: <code>http://[адрес-сервера]:8000/bitrix/event</code></li>
+        <li>События: <code>ONTASKADD</code>, <code>ONTASKUPDATE</code>, <code>ONTASKDELETE</code>, <code>ONTASKCOMMENTADD</code></li>
+    </ul>
+</div>
+{% endblock %}
