@@ -77,10 +77,19 @@
 
 </form>
 
-<form action="/settings/app/sync-now" method="post" class="mt-4">
+<form action="/settings/app/sync-now" method="post" class="mt-4 inline-block">
     <button type="submit"
         class="text-blue-700 dark:text-blue-400 hover:underline text-sm font-medium">
         Синхронизировать сейчас
+    </button>
+</form>
+
+<form action="/settings/app/sync-reset" method="post"
+      class="mt-4 inline-block ml-6"
+      onsubmit="return confirm('Сбросить состояние? Следующая синхронизация пройдёт молча, без уведомлений в Telegram (используется при смене проекта или массовых изменениях в Bitrix24, чтобы не спамить чаты).');">
+    <button type="submit"
+        class="text-gray-600 dark:text-gray-400 hover:underline text-sm font-medium">
+        Сбросить состояние синхронизации
     </button>
 </form>
 

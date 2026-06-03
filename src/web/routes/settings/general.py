@@ -371,6 +371,20 @@ async def settings_app_sync_now(request: Request):
     return RedirectResponse(settings_router.prefix + "/app", status_code=HTTP_303_SEE_OTHER)
 
 
+@settings_router.post("/app/sync-reset")
+async def settings_app_sync_reset(request: Request):
+    """Сбрасывает флаг 'первый импорт пройден'. Следующий sync снова молчит
+    (полезно после смены проекта или массовых изменений в Bitrix, чтобы не
+    спамить чаты сотнями уведомлений)."""
+    from core.sync import reset_initial_flag
+    try:
+        await reset_initial_flag()
+        request.session['saved'] = True
+    except Exception as e:
+        logging.warning(f"Сброс флага синхронизации завершился с ошибкой: {e}")
+    return RedirectResponse(settings_router.prefix + "/app", status_code=HTTP_303_SEE_OTHER)
+
+
 # ---------- Совместимость: старые /asana ссылки редиректят на /bitrix ----------
 @settings_router.get("/asana")
 @settings_router.get("/asana/")
