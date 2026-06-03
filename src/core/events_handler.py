@@ -20,33 +20,84 @@ def _extract_event_name(payload: Dict[str, Any]) -> str:
     return (payload.get("event") or payload.get("EVENT") or "").upper()
 
 
-def _extract_task_id(payload: Dict[str, Any]) -> Optional[str]:
-    """Достаёт id задачи из произвольной формы payload."""
-    # Возможные пути в зависимости от события:
-    # data[FIELDS_AFTER][ID]  /  data[FIELDS][ID]  /  data[TASK_ID]
-    for key in ("data[FIELDS_AFTER][ID]", "data[FIELDS][ID]",
-                "data[TASK_ID]", "data[FIELDS_BEFORE][ID]"):
-        if key in payload:
-            return str(payload[key])
+# Ключи, по которым ищем TASK_ID, в порядке убывания приоритета.
+# Для ONTASKCOMMENTADD важно: data[FIELDS][ID] — это ID КОММЕНТАРИЯ,
+# а не задачи; задача лежит в data[FIELDS][TASK_ID] / data[TASK_ID].
+_TASK_ID_KEYS_COMMENT = (
+    "data[FIELDS][TASK_ID]", "data[TASK_ID]", "data[FIELDS_AFTER][TASK_ID]",
+)
+_TASK_ID_KEYS_TASK = (
+    "data[FIELDS_AFTER][ID]", "data[FIELDS][ID]", "data[TASK_ID]",
+    "data[FIELDS_BEFORE][ID]", "data[FIELDS][TASK_ID]",
+)
+
+
+def _extract_task_id(payload: Dict[str, Any], event: str = "") -> Optional[str]:
+    """Достаёт id задачи из произвольной формы payload (form-urlencoded или JSON)."""
+    keys = _TASK_ID_KEYS_COMMENT if "COMMENT" in event else _TASK_ID_KEYS_TASK
+
+    # 1) плоский вариант (form-urlencoded со скобками в имени)
+    for k in keys:
+        if k in payload:
+            val = str(payload[k])
+            if val and val != "0":
+                return val
+
+    # 2) вложенный JSON
     data = payload.get("data") or {}
     if isinstance(data, dict):
-        for k in ("FIELDS_AFTER", "FIELDS", "FIELDS_BEFORE"):
-            sub = data.get(k)
-            if isinstance(sub, dict) and "ID" in sub:
-                return str(sub["ID"])
-        if "TASK_ID" in data:
-            return str(data["TASK_ID"])
+        if "COMMENT" in event:
+            for path in (("FIELDS", "TASK_ID"), ("TASK_ID",),
+                         ("FIELDS_AFTER", "TASK_ID")):
+                node: Any = data
+                ok = True
+                for p in path:
+                    if isinstance(node, dict) and p in node:
+                        node = node[p]
+                    else:
+                        ok = False
+                        break
+                if ok and node:
+                    val = str(node)
+                    if val and val != "0":
+                        return val
+        else:
+            for k in ("FIELDS_AFTER", "FIELDS", "FIELDS_BEFORE"):
+                sub = data.get(k)
+                if isinstance(sub, dict):
+                    for f in ("ID", "TASK_ID"):
+                        if sub.get(f):
+                            return str(sub[f])
+            if data.get("TASK_ID"):
+                return str(data["TASK_ID"])
     return None
+
+
+def _extract_comment_text(payload: Dict[str, Any]) -> str:
+    """Достаёт текст комментария из ONTASKCOMMENTADD."""
+    for k in ("data[FIELDS][POST_MESSAGE]",
+              "data[FIELDS_AFTER][POST_MESSAGE]",
+              "data[COMMENT][POST_MESSAGE]"):
+        if k in payload and payload[k]:
+            return str(payload[k])
+    data = payload.get("data") or {}
+    if isinstance(data, dict):
+        for k in ("FIELDS", "FIELDS_AFTER", "COMMENT"):
+            sub = data.get(k)
+            if isinstance(sub, dict) and sub.get("POST_MESSAGE"):
+                return str(sub["POST_MESSAGE"])
+    return ""
 
 
 async def handle_bitrix_event(payload: Dict[str, Any]) -> None:
     """Точка входа для исходящего вебхука Bitrix24."""
     event = _extract_event_name(payload)
-    task_id = _extract_task_id(payload)
+    task_id = _extract_task_id(payload, event)
     logging.info(f"Bitrix event: {event}, task_id={task_id}")
 
     if not event or not task_id:
-        logging.warning(f"Не удалось распознать событие Bitrix24: {payload}")
+        # отдельно дампим payload — чтобы было видно, что прислал Bitrix
+        logging.warning(f"Не удалось распознать событие Bitrix24. Payload: {payload}")
         return
 
     if event in ("ONTASKADD",):
@@ -56,8 +107,7 @@ async def handle_bitrix_event(payload: Dict[str, Any]) -> None:
     elif event in ("ONTASKDELETE",):
         await _on_task_delete(task_id)
     elif event in ("ONTASKCOMMENTADD",):
-        comment = (payload.get("data[COMMENT][POST_MESSAGE]")
-                   or (payload.get("data") or {}).get("COMMENT", {}).get("POST_MESSAGE", ""))
+        comment = _extract_comment_text(payload)
         await _on_comment_add(task_id, comment)
     else:
         logging.info(f"Событие {event} не обрабатывается")
@@ -106,6 +156,10 @@ async def _on_task_update(task_id: str) -> None:
     async with Database.make_session() as session:
         ticket = await Ticket.get_by_gid(session, task_id)
         if ticket is None:
+            return
+
+        # Удалённые тикеты — вне зоны отслеживания.
+        if ticket.deleted:
             return
 
         # обновляем поля
@@ -165,11 +219,17 @@ async def _on_comment_add(task_id: str, comment_text: str) -> None:
     async with Database.make_session() as session:
         ticket = await Ticket.get_by_gid(session, task_id)
         if ticket is None:
+            logging.info(f"Комментарий к задаче {task_id}: тикет не найден в БД "
+                         f"(возможно, задача создана не через форму и не подхвачена sync)")
+            return
+        if ticket.deleted:
             return
         text = f"На '{ticket.title}' добавлен комментарий"
         if comment_text:
             text += f": {comment_text}"
-        await _notify_chats(session, "commented", text)
+        sent = await _notify_chats(session, "commented", text)
+        if sent == 0:
+            logging.info("Комментарий: нет чатов с включённым флагом 'commented'")
 
 
 async def _apply_tag_rules(session, ticket: Ticket, tags: list) -> None:
@@ -214,7 +274,7 @@ async def _apply_tag_rules(session, ticket: Ticket, tags: list) -> None:
             logging.warning(f"Не удалось применить правило тега {rule.tag}: {e}")
 
 
-async def _notify_chats(session, flag: str, text: str) -> None:
+async def _notify_chats(session, flag: str, text: str) -> int:
     column = {
         "status_changed": TelegramConfigExtended.status_changed,
         "deleted": TelegramConfigExtended.deleted,
@@ -224,10 +284,13 @@ async def _notify_chats(session, flag: str, text: str) -> None:
         "created_full": TelegramConfigExtended.created_full,
     }.get(flag)
     if column is None:
-        return
+        return 0
     chats = (await session.execute(select(TelegramConfigExtended).where(column == True))).scalars().all()
+    sent = 0
     for c in chats:
         try:
             await TgBot.send_message(c.chat_id, text)
+            sent += 1
         except Exception as e:
             logging.warning(f"Не удалось отправить в чат {c.chat_id}: {e}")
+    return sent

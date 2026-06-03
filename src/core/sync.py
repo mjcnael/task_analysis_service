@@ -159,6 +159,13 @@ async def sync_once() -> None:
                 continue
 
             # -------- УЖЕ ЗНАЕМ ЗАДАЧУ --------
+            # Если тикет помечен удалённым — пользователь (или предыдущий sync)
+            # явно вывел его из отслеживания. Не трогаем: ни статусов, ни
+            # уведомлений, ни «восстановлений», даже если задача всё ещё
+            # существует в Bitrix24.
+            if ticket.deleted:
+                continue
+
             watch_fields = (await cfg_get("watch_field_changes")) == "1"
             if watch_fields:
                 if title and title != ticket.title:
@@ -173,15 +180,6 @@ async def sync_once() -> None:
                 if not is_initial:
                     await _notify_chats(session, "status_changed",
                                         f"'{ticket.title}' завершено")
-
-            # восстановление
-            if ticket.deleted:
-                ticket.deleted = False
-                ticket.deleted_at = None
-                session.add(Status(text="Удаление отменено (sync)", ticket=ticket))
-                if not is_initial:
-                    await _notify_chats(session, "status_changed",
-                                        f"'{ticket.title}' восстановлено в Bitrix24")
 
             # смена стадии — пишем Status только если реально отличается от last_status
             last = ticket.last_status
