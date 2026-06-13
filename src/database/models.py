@@ -27,9 +27,11 @@ class Ticket(Base):
     created_at: Mapped[datetime] = mapped_column(default=datetime.now)
     deleted_at: Mapped[Optional[datetime]]
     additional_info: Mapped[Optional["AdditionalTicketInfo"]] = relationship(
-        back_populates="ticket", uselist=False, lazy='selectin')
+        back_populates="ticket", uselist=False, lazy="selectin"
+    )
     statuses: Mapped[List["Status"]] = relationship(
-        back_populates="ticket", lazy='selectin')
+        back_populates="ticket", lazy="selectin"
+    )
 
     @hybrid_property
     def last_status(self) -> Optional["Status"]:
@@ -58,14 +60,12 @@ class Ticket(Base):
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Ticket:
-        mapping = {'Задачи:': 'text'}
-        kwargs = {mapping.get(k, k): v for k, v in data.items()}
-        return cls(**kwargs)
+        return cls(**data)
 
     @classmethod
     def full_ticket_from_dict(cls, data: Dict[str, Any]) -> Ticket:
         info = AdditionalTicketInfo.from_dict(data)
-        data['title'] = f"Челлендж {info.k7_id}"
+        data["title"] = f"Челлендж {info.k7_id}"
         logging.info(data)
         ticket = cls.from_dict(data)
         logging.info(ticket.title)
@@ -78,7 +78,7 @@ class Ticket(Base):
         result = await session.execute(query)
         ticket = result.scalars().first()
         return ticket
-    
+
     def __str__(self):
         if self.additional_info is not None:
             info = self.additional_info
@@ -95,7 +95,7 @@ class Ticket(Base):
 
 
 class AdditionalTicketInfo(Base):
-    __tablename__ = 'additional_ticket_info'
+    __tablename__ = "additional_ticket_info"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     worker_fullname: Mapped[str]
@@ -105,19 +105,22 @@ class AdditionalTicketInfo(Base):
     client: Mapped[str]
 
     ticket_id: Mapped["Ticket"] = mapped_column(
-        ForeignKey("tickets.id"), unique=True, nullable=False)
+        ForeignKey("tickets.id"), unique=True, nullable=False
+    )
     ticket: Mapped["Ticket"] = relationship(
-        back_populates="additional_info", lazy='selectin')
+        back_populates="additional_info", lazy="selectin"
+    )
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]):
-        mapping = {'ФИО Внедренца': 'worker_fullname',
-                   'Номер наряда из К7': 'k7_id',
-                   'Офис': 'office',
-                   'Менеджер по наряду': 'manager',
-                   'Клиент:': 'client'}
-        data = {key: value for key,
-                value in data.items() if key in mapping.keys()}
+        mapping = {
+            "ФИО Внедренца": "worker_fullname",
+            "Номер наряда из К7": "k7_id",
+            "Офис": "office",
+            "Менеджер по наряду": "manager",
+            "Клиент:": "client",
+        }
+        data = {key: value for key, value in data.items() if key in mapping.keys()}
         kwargs = {mapping.get(k, k): v for k, v in data.items()}
         return cls(**kwargs)
 
@@ -149,7 +152,7 @@ class TelegramConfig(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     destination_id: Mapped[str]
     destination_type: Mapped[str]
-    
+
 
 class TelegramConfigExtended(Base):
     __tablename__ = "telegram_config_extended"
@@ -181,11 +184,11 @@ class TagRule(Base):
         sections = await projects_api.get_sections(self.project_gid)
 
         for p in projects:
-            if p['gid'] == self.project_gid:
-                self.project_name = p['name']
+            if p["gid"] == self.project_gid:
+                self.project_name = p["name"]
 
         for s in sections:
-            if s['gid'] == self.section_gid:
-                self.section_name = s['name']
+            if s["gid"] == self.section_gid:
+                self.section_name = s["name"]
 
         session.add(self)
