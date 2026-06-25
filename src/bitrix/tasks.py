@@ -85,6 +85,19 @@ class TaskApi:
         tasks = _result_dict(res).get("tasks")
         return tasks if isinstance(tasks, list) else []
 
+    async def get_comment(self, task_id: str, comment_id: str) -> dict:
+        """Возвращает один комментарий задачи (с текстом и автором).
+
+        Нужен потому, что исходящий вебхук ONTASKCOMMENTADD присылает только
+        ID комментария, без самого текста и автора.
+        """
+        res = await self._client.call("task.commentitem.get", {
+            "TASKID": int(task_id) if str(task_id).isdigit() else task_id,
+            "ITEMID": int(comment_id) if str(comment_id).isdigit() else comment_id,
+        })
+        result = res.get("result")
+        return result if isinstance(result, dict) else {}
+
     async def add_comment(self, task_id: str, text: str) -> dict:
         params = {
             "TASKID": int(task_id) if str(task_id).isdigit() else task_id,

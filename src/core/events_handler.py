@@ -4,6 +4,7 @@
 уведомления в Telegram (analog Asana-events из исходной версии).
 """
 import logging
+import time
 from typing import Any, Dict, Optional
 from sqlalchemy import select
 
@@ -18,6 +19,44 @@ from tgbot import TgBot
 def _extract_event_name(payload: Dict[str, Any]) -> str:
     """Bitrix отдаёт имя события в поле 'event' (например ONTASKUPDATE)."""
     return (payload.get("event") or payload.get("EVENT") or "").upper()
+
+
+# --- Дедупликация дублирующихся доставок исходящего вебхука ---
+# Bitrix нередко доставляет одно и то же событие несколько раз (например, если
+# обработчик исходящего вебхука зарегистрирован в портале дважды). Чтобы не
+# слать дублирующиеся уведомления, держим небольшой кэш недавно обработанных
+# событий. Это лишь подстраховка — правильнее убрать дублирующий обработчик
+# в самом Bitrix.
+_recent_events: Dict[str, float] = {}
+_DEDUP_TTL = 60.0        # для add/comment/delete — событие уникально по своей сути
+_DEDUP_TTL_UPDATE = 5.0  # для update короткое окно: дубль приходит за миллисекунды
+
+
+def _dedup_seen(key: str, ttl: float) -> bool:
+    """True, если событие с таким ключом уже обрабатывалось за последние `ttl` сек."""
+    now = time.monotonic()
+    # чистим протухшие записи, заодно ограничивая рост словаря
+    for k in [k for k, ts in _recent_events.items() if now - ts > _DEDUP_TTL]:
+        _recent_events.pop(k, None)
+    last = _recent_events.get(key)
+    if last is not None and now - last <= ttl:
+        return True
+    _recent_events[key] = now
+    return False
+
+
+def _extract_comment_id(payload: Dict[str, Any]) -> Optional[str]:
+    """ID самого комментария из ONTASKCOMMENTADD (data[FIELDS][ID])."""
+    for k in ("data[FIELDS][ID]", "data[FIELDS_AFTER][ID]"):
+        if k in payload and str(payload[k]) not in ("", "0"):
+            return str(payload[k])
+    data = payload.get("data") or {}
+    if isinstance(data, dict):
+        for k in ("FIELDS", "FIELDS_AFTER"):
+            sub = data.get(k)
+            if isinstance(sub, dict) and sub.get("ID"):
+                return str(sub["ID"])
+    return None
 
 
 # Ключи, по которым ищем TASK_ID, в порядке убывания приоритета.
@@ -100,6 +139,21 @@ async def handle_bitrix_event(payload: Dict[str, Any]) -> None:
         logging.warning(f"Не удалось распознать событие Bitrix24. Payload: {payload}")
         return
 
+    # гасим повторную доставку одного и того же события
+    comment_id = _extract_comment_id(payload) if "COMMENT" in event else None
+    if "COMMENT" in event:
+        dedup_key = f"comment:{comment_id or task_id}"
+        ttl = _DEDUP_TTL
+    elif event == "ONTASKUPDATE":
+        dedup_key = f"update:{task_id}"
+        ttl = _DEDUP_TTL_UPDATE
+    else:
+        dedup_key = f"{event}:{task_id}"
+        ttl = _DEDUP_TTL
+    if _dedup_seen(dedup_key, ttl):
+        logging.info(f"Дубликат события {event} ({dedup_key}) — пропущен")
+        return
+
     if event in ("ONTASKADD",):
         await _on_task_add(task_id)
     elif event in ("ONTASKUPDATE",):
@@ -108,7 +162,7 @@ async def handle_bitrix_event(payload: Dict[str, Any]) -> None:
         await _on_task_delete(task_id)
     elif event in ("ONTASKCOMMENTADD",):
         comment = _extract_comment_text(payload)
-        await _on_comment_add(task_id, comment)
+        await _on_comment_add(task_id, comment_id, comment)
     else:
         logging.info(f"Событие {event} не обрабатывается")
 
@@ -215,7 +269,28 @@ async def _on_task_delete(task_id: str) -> None:
         await _notify_chats(session, "deleted", f"'{ticket.title}' удалено")
 
 
-async def _on_comment_add(task_id: str, comment_text: str) -> None:
+async def _on_comment_add(task_id: str, comment_id: Optional[str],
+                          comment_text: str) -> None:
+    # Текст и автора комментария исходящий вебхук не присылает (только ID),
+    # поэтому дотягиваем сам комментарий. Это нужно чтобы:
+    #   1) показать текст в уведомлении;
+    #   2) отсеять системные/авто-комментарии (создание задачи, смена полей),
+    #      которые Bitrix генерирует сам и которые засоряют чат.
+    if not comment_text and comment_id:
+        api = get_task_api()
+        if api is not None:
+            try:
+                c = await api.get_comment(task_id, comment_id)
+                author = str(c.get("AUTHOR_ID") or c.get("authorId") or "")
+                message = str(c.get("POST_MESSAGE") or c.get("postMessage") or "").strip()
+                if author in ("", "0") or not message:
+                    logging.info(f"Системный/пустой комментарий {comment_id} "
+                                 f"к задаче {task_id} — без уведомления")
+                    return
+                comment_text = message
+            except BitrixApiError as e:
+                logging.warning(f"Не удалось получить комментарий {comment_id}: {e}")
+
     async with Database.make_session() as session:
         ticket = await Ticket.get_by_gid(session, task_id)
         if ticket is None:
