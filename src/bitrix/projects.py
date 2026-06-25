@@ -69,7 +69,8 @@ class ProjectsApi:
             })
         except BitrixApiError:
             return []
-        tasks = res.get("result", {}).get("tasks", []) or []
+        result = res.get("result")
+        tasks = (result.get("tasks", []) if isinstance(result, dict) else []) or []
         seen = set()
         out = []
         for t in tasks:
@@ -88,4 +89,6 @@ class ProjectsApi:
             "select": ["ID", "TITLE", "STATUS", "STAGE_ID", "TAGS"],
         }
         res = await self._client.call("tasks.task.list", params)
-        return res.get("result", {}).get("tasks", [])
+        result = res.get("result")
+        tasks = result.get("tasks", []) if isinstance(result, dict) else []
+        return tasks if isinstance(tasks, list) else []

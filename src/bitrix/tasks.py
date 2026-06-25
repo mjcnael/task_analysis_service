@@ -1,8 +1,21 @@
 """Работа с задачами Bitrix24."""
 import logging
-from typing import Optional, List
+from typing import Optional, List, Any
 from .client import BitrixClient, bitrix_client, BitrixApiError
 from database.models import Ticket
+
+
+def _result_dict(res: Any) -> dict:
+    """Достаёт res['result'] как dict.
+
+    Bitrix (PHP) при пустом ответе отдаёт result в виде пустого СПИСКА [],
+    а не объекта {}. Прямой .get() на списке ронял обработчик
+    ('list' object has no attribute 'get').
+    """
+    if not isinstance(res, dict):
+        return {}
+    result = res.get("result")
+    return result if isinstance(result, dict) else {}
 
 
 class TaskApi:
@@ -42,8 +55,8 @@ class TaskApi:
             fields["TAGS"] = tags
 
         res = await self._client.call("tasks.task.add", {"fields": fields})
-        task = res.get("result", {}).get("task", {})
-        if not task or "id" not in task:
+        task = _result_dict(res).get("task") or {}
+        if not isinstance(task, dict) or not (task.get("id") or task.get("ID")):
             raise BitrixApiError(0, f"Bitrix не вернул id задачи: {res}", method="tasks.task.add")
         return task
 
@@ -51,7 +64,8 @@ class TaskApi:
         res = await self._client.call("tasks.task.get", {
             "taskId": int(task_id) if str(task_id).isdigit() else task_id
         })
-        return res.get("result", {}).get("task", {})
+        task = _result_dict(res).get("task")
+        return task if isinstance(task, dict) else {}
 
     async def update_task(self, task_id: str, fields: dict) -> dict:
         params = {
@@ -59,7 +73,8 @@ class TaskApi:
             "fields": fields,
         }
         res = await self._client.call("tasks.task.update", params)
-        return res.get("result", {}).get("task", {})
+        task = _result_dict(res).get("task")
+        return task if isinstance(task, dict) else {}
 
     async def list_tasks_by_group(self, group_id: str) -> List[dict]:
         params = {
@@ -67,7 +82,8 @@ class TaskApi:
             "select": ["ID", "TITLE", "STATUS", "STAGE_ID", "TAGS"],
         }
         res = await self._client.call("tasks.task.list", params)
-        return res.get("result", {}).get("tasks", [])
+        tasks = _result_dict(res).get("tasks")
+        return tasks if isinstance(tasks, list) else []
 
     async def add_comment(self, task_id: str, text: str) -> dict:
         params = {

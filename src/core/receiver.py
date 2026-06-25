@@ -115,7 +115,7 @@ async def receive_form(data: Dict[str, Any]) -> Dict[str, Any]:
             }
 
         # 5. Сохранение результата
-        task_bitrix_id = str(task.get("id"))
+        task_bitrix_id = str(task.get("id") or task.get("ID") or "")
         ticket.gid = task_bitrix_id
 
         status_create = Status(text="Создано", ticket=ticket)

@@ -14,6 +14,16 @@ class Base(DeclarativeBase):
     pass
 
 
+def _norm_key(key: str) -> str:
+    """Нормализует имя поля формы: убирает пробелы и хвостовое двоеточие.
+
+    Поля формы приходят то с двоеточием ("Клиент:"), то без ("Клиент"),
+    поэтому жёсткое сравнение по строке периодически промахивалось и тикет
+    создавался без обязательных полей (NOT NULL → задача не сохранялась).
+    """
+    return (key or "").strip().rstrip(":").strip()
+
+
 class Ticket(Base):
     __tablename__ = "tickets"
 
@@ -38,7 +48,10 @@ class Ticket(Base):
         """Возвращает последний статус тикета (с наибольшим datetime)"""
         if not self.statuses:  # Если статусов нет
             return None
-        return max(self.statuses, key=lambda s: s.datetime)
+        # datetime у только что добавленного, но ещё не сброшенного в БД
+        # статуса равен None (default=datetime.now срабатывает лишь при INSERT),
+        # поэтому сравнение None с datetime роняло max() — подстраховываемся.
+        return max(self.statuses, key=lambda s: s.datetime or datetime.min)
 
     @last_status.expression
     def last_status_exp(cls):
@@ -65,9 +78,16 @@ class Ticket(Base):
     @classmethod
     def full_ticket_from_dict(cls, data: Dict[str, Any]) -> Ticket:
         info = AdditionalTicketInfo.from_dict(data)
-        data["title"] = f"Челлендж {info.k7_id}"
-        logging.info(data)
-        ticket = cls.from_dict(data)
+        # Текст задач в форме приходит под ключом "Задачи" / "Задачи:".
+        # Раньше это маппилось в поле text; коммит fix form mapping убрал
+        # маппинг, из-за чего cls(**data) падал на отсутствии обязательного
+        # аргумента text и задача в Bitrix не создавалась.
+        text = ""
+        for k, v in data.items():
+            if _norm_key(k).lower() == "задачи":
+                text = v or ""
+                break
+        ticket = cls(title=f"Челлендж {info.k7_id}", text=text)
         logging.info(ticket.title)
         ticket.additional_info = info
         return ticket
@@ -118,10 +138,17 @@ class AdditionalTicketInfo(Base):
             "Номер наряда из К7": "k7_id",
             "Офис": "office",
             "Менеджер по наряду": "manager",
-            "Клиент:": "client",
+            "Клиент": "client",
         }
-        data = {key: value for key, value in data.items() if key in mapping.keys()}
-        kwargs = {mapping.get(k, k): v for k, v in data.items()}
+        kwargs: Dict[str, Any] = {}
+        for key, value in data.items():
+            field = mapping.get(_norm_key(key))
+            if field:
+                kwargs[field] = value
+        # Обязательные (NOT NULL) поля не должны ронять flush, если форма
+        # прислала их под другим именем или вовсе пропустила.
+        for required in ("worker_fullname", "k7_id", "office", "client"):
+            kwargs.setdefault(required, "")
         return cls(**kwargs)
 
 
